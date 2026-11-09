@@ -18,12 +18,20 @@
 
 FROM python:3.11-slim
 
+# Optional package mirrors (empty = upstream); see the main Dockerfile header.
+ARG APT_MIRROR=""
+ARG PYPI_MIRROR=""
+
 # ----- Common CLI + data tooling -------------------------------------------
 # A pragmatic toolbelt for the kinds of shell tasks the model runs (clone a
 # repo, fetch a URL, grep code, slice JSON). numpy/pandas are installed via pip
 # so simple data crunching works out of the box. Trim this list if image size
 # matters more than coverage for your deployment.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${APT_MIRROR:-http://deb.debian.org}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         git \
         curl \
         ca-certificates \
@@ -31,8 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         jq \
         build-essential \
         nodejs \
-        fonts-wqy-zenhei \
-    && rm -rf /var/lib/apt/lists/*
+        fonts-wqy-zenhei
 
 # nodejs (the runtime, deliberately not npm): CLI apps installed from npm ship
 # console scripts whose shebang is `#!/usr/bin/env node`, so the interpreter has
@@ -52,7 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # just Python. Drop it if your deployment only needs Python execution.
 
 # Python data + office-document stack. Kept separate so it is easy to drop.
-# --no-cache-dir keeps the layer lean.
+# The pip cache lives in a BuildKit cache mount, so the layer stays lean.
 #
 # numpy/pandas cover simple data crunching. The rest back the built-in office
 # skills (deeptutor/skills/builtin/{docx,pptx,xlsx,pdf}/SKILL.md): the model
@@ -60,7 +67,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # they MUST be present here in the sidecar — the runner image carries no
 # deeptutor deps of its own. All ship as wheels (no extra apt needed). Keep this
 # list in sync with the libraries those SKILL.md playbooks promise are available.
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 120 ${PYPI_MIRROR:+--index-url "$PYPI_MIRROR"} \
         numpy \
         pandas \
         python-docx \

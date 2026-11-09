@@ -12,7 +12,22 @@
 # Prerequisites:
 #   1. Runtime settings are created under data/user/settings on first start
 #   2. Configure provider profiles from the web Settings page or model_catalog.json
+#
+# Package mirrors (optional; empty = upstream registries):
+#   docker build --build-arg APT_MIRROR=https://mirrors.aliyun.com \
+#     --build-arg PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple/ \
+#     --build-arg NPM_MIRROR=https://registry.npmmirror.com \
+#     --build-arg RUSTUP_MIRROR=https://rsproxy.cn .
+#   scripts/docker_compose.py fills these from data/user/settings/docker_build.json
+#   {"mirrors": {"apt": …, "pypi": …, "npm": …, "rustup": …}}.
+# Package downloads use BuildKit cache mounts, so a one-line requirements
+# change re-resolves against the local cache instead of re-downloading GBs.
 # ============================================
+
+ARG APT_MIRROR=""
+ARG PYPI_MIRROR=""
+ARG NPM_MIRROR=""
+ARG RUSTUP_MIRROR=""
 
 # ============================================
 # Stage 1: Frontend Builder
@@ -21,6 +36,7 @@
 # The output is platform-independent static assets (JS/HTML/CSS),
 # so there is no need to cross-compile this stage.
 FROM --platform=$BUILDPLATFORM node:22.23.4-slim AS frontend-builder
+ARG NPM_MIRROR
 
 WORKDIR /app/web
 
@@ -28,9 +44,11 @@ WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
 
 # Install dependencies with generous timeout for CI environments
-RUN npm config set fetch-timeout 600000 && \
+# npm rewrites registry.npmjs.org lockfile URLs onto --registry (replace-registry-host).
+RUN --mount=type=cache,target=/root/.npm \
+    npm config set fetch-timeout 600000 && \
     npm config set fetch-retries 5 && \
-    npm ci --legacy-peer-deps
+    npm ci --legacy-peer-deps --prefer-offline ${NPM_MIRROR:+--registry="$NPM_MIRROR"}
 
 # Copy frontend source code
 COPY web/ ./
@@ -62,12 +80,15 @@ FROM node:22.23.4-slim AS node-runtime
 # Stage 2: Python Base with Dependencies
 # ============================================
 FROM python:3.11-slim AS python-base
+ARG APT_MIRROR
+ARG PYPI_MIRROR
+ARG RUSTUP_MIRROR
 
 # Set environment variables
+# No PIP_NO_CACHE_DIR: the pip cache lives in a BuildKit cache mount, not a layer.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
@@ -75,7 +96,10 @@ WORKDIR /app
 # Install system dependencies
 # Note: libgl1 and libglib2.0-0 are required for OpenCV (used by mineru)
 # Rust is required for building tiktoken and other packages without pre-built wheels
-RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${APT_MIRROR:-https://deb.debian.org}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     curl \
@@ -88,8 +112,11 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     libxrender1 \
     pkg-config \
     libssl-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    && if [ -n "$RUSTUP_MIRROR" ]; then \
+        export RUSTUP_DIST_SERVER="$RUSTUP_MIRROR" RUSTUP_UPDATE_ROOT="$RUSTUP_MIRROR/rustup"; \
+        rustup_init="$RUSTUP_MIRROR/rustup-init.sh"; \
+    else rustup_init=https://sh.rustup.rs; fi \
+    && curl --proto '=https' --tlsv1.2 -sSf --retry 3 "$rustup_init" | sh -s -- -y --profile minimal
 
 # Add Rust to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -97,13 +124,15 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Copy requirements and install Python dependencies
 COPY requirements/ ./requirements/
 COPY requirements.txt ./
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 120 ${PYPI_MIRROR:+--index-url "$PYPI_MIRROR"} --upgrade pip && \
+    pip install --retries 10 --timeout 120 ${PYPI_MIRROR:+--index-url "$PYPI_MIRROR"} -r requirements.txt
 
 # ============================================
 # Stage 3: Production Image
 # ============================================
 FROM python:3.11-slim AS production
+ARG APT_MIRROR
 
 # Labels
 LABEL maintainer="DeepTutor Team" \
@@ -137,7 +166,10 @@ WORKDIR /app
 # Office previews convert documents to PDF in the main app. Writer, Calc and
 # Impress cover DOCX, XLSX and PPTX; Noto CJK preserves Chinese text and
 # Liberation supplies common Latin font substitutes in the rendered pages.
-RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && sed -i "s|http://deb.debian.org|${APT_MIRROR:-https://deb.debian.org}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     curl \
@@ -155,8 +187,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     libreoffice-calc \
     libreoffice-impress \
     fonts-noto-cjk \
-    fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-liberation
 
 # Copy Node.js from node-runtime stage (platform-matched binary)
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node

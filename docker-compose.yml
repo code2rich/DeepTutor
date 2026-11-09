@@ -4,7 +4,8 @@
 # This file provides orchestration for DeepTutor services
 #
 # Usage:
-#   Production:  python scripts/docker_compose.py up -d
+#   Production:  python scripts/docker_compose.py -f docker-compose.yml up -d --build
+#   (without -f, compose picks compose.yaml, which pulls the prebuilt ghcr image)
 #   Development: python scripts/docker_compose.py -f docker-compose.yml -f docker-compose.dev.yml up
 #   Build only:  python scripts/docker_compose.py build
 #
@@ -79,6 +80,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
+      # Optional package mirrors; filled from data/user/settings/docker_build.json
+      # by scripts/docker_compose.py. Empty = upstream registries.
+      args:
+        APT_MIRROR: ${DEEPTUTOR_APT_MIRROR:-}
+        PYPI_MIRROR: ${DEEPTUTOR_PYPI_MIRROR:-}
+        NPM_MIRROR: ${DEEPTUTOR_NPM_MIRROR:-}
+        RUSTUP_MIRROR: ${DEEPTUTOR_RUSTUP_MIRROR:-}
     container_name: deeptutor
     restart: unless-stopped
     ports:
@@ -156,6 +164,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runner
+      # Optional package mirrors; filled from data/user/settings/docker_build.json
+      # by scripts/docker_compose.py. Empty = upstream registries.
+      args:
+        APT_MIRROR: ${DEEPTUTOR_APT_MIRROR:-}
+        PYPI_MIRROR: ${DEEPTUTOR_PYPI_MIRROR:-}
     container_name: deeptutor-sandbox-runner
     restart: unless-stopped
 

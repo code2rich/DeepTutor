@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import sys
 
+import pytest
 import yaml
 
 
@@ -42,6 +43,11 @@ def test_render_docker_env_reads_json_only(tmp_path: Path) -> None:
         "DEEPTUTOR_DOCKER_BACKEND_PORT": "9001",
         "DEEPTUTOR_DOCKER_FRONTEND_PORT": "4000",
         "DEEPTUTOR_DOCKER_POCKETBASE_PORT": "19090",
+        # No docker_build.json → every build keeps the upstream registries.
+        "DEEPTUTOR_APT_MIRROR": "",
+        "DEEPTUTOR_PYPI_MIRROR": "",
+        "DEEPTUTOR_NPM_MIRROR": "",
+        "DEEPTUTOR_RUSTUP_MIRROR": "",
     }
     saved = output_path.read_text(encoding="utf-8")
     assert "\nBACKEND_PORT=" not in saved
@@ -63,6 +69,61 @@ def test_render_docker_env_uses_defaults_for_missing_or_invalid_json(tmp_path: P
     assert values["DEEPTUTOR_DOCKER_BACKEND_PORT"] == "8001"
     assert values["DEEPTUTOR_DOCKER_FRONTEND_PORT"] == "3782"
     assert values["DEEPTUTOR_DOCKER_POCKETBASE_PORT"] == "8090"
+
+
+def test_render_docker_env_passes_build_mirrors_to_compose(tmp_path: Path) -> None:
+    module = _load_module()
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir()
+    (settings_dir / "docker_build.json").write_text(
+        json.dumps(
+            {
+                "mirrors": {
+                    "apt": "https://mirrors.aliyun.com/",
+                    "pypi": " https://mirrors.aliyun.com/pypi/simple/ ",
+                    "npm": "",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "docker.env"
+
+    values = module.render_docker_env(settings_dir, output_path)
+
+    assert values["DEEPTUTOR_APT_MIRROR"] == "https://mirrors.aliyun.com"
+    assert values["DEEPTUTOR_PYPI_MIRROR"] == "https://mirrors.aliyun.com/pypi/simple"
+    assert values["DEEPTUTOR_NPM_MIRROR"] == ""
+    assert "DEEPTUTOR_APT_MIRROR=https://mirrors.aliyun.com" in output_path.read_text("utf-8")
+
+
+def test_render_docker_env_rejects_non_url_build_mirror(tmp_path: Path) -> None:
+    module = _load_module()
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir()
+    (settings_dir / "docker_build.json").write_text(
+        json.dumps({"mirrors": {"apt": "mirrors.aliyun.com"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="mirrors.apt"):
+        module.render_docker_env(settings_dir, tmp_path / "docker.env")
+
+
+def test_dockerfiles_take_optional_mirrors_and_cache_downloads() -> None:
+    root = Path(__file__).resolve().parents[2]
+    main = (root / "Dockerfile").read_text(encoding="utf-8")
+    runner = (root / "Dockerfile.runner").read_text(encoding="utf-8")
+    compose = _compose_service(root, "docker-compose.yml")
+
+    for arg in ("APT_MIRROR", "PYPI_MIRROR", "NPM_MIRROR", "RUSTUP_MIRROR"):
+        assert f'ARG {arg}=""' in main
+        assert arg in compose["build"]["args"]
+    assert "--mount=type=cache,target=/root/.cache/pip" in main
+    assert "--mount=type=cache,target=/root/.npm" in main
+    assert "PIP_NO_CACHE_DIR=1" not in main
+    assert "--mount=type=cache,target=/root/.cache/pip" in runner
+    assert "--no-cache-dir" not in runner
 
 
 def test_workspace_host_prepares_nested_outputs(tmp_path: Path) -> None:

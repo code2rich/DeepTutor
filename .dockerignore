@@ -111,8 +111,9 @@ docker-compose*.yml
 # ============================================
 # User Data (will be mounted as volumes)
 # ============================================
-data/user/
-data/knowledge_bases/
+# All of data/ is runtime state (auth, provider keys, pocketbase); none of it
+# is COPY'd, so keep it out of the build context entirely.
+data/
 run_code_workspace/
 
 # ============================================

@@ -556,6 +556,15 @@ IMAGEGEN_PROVIDERS: dict[str, GenerationProviderSpec] = {
         adapter="dashscope",
         default_model="wanx2.1-t2i-turbo",
     ),
+    # Local Qwen-Image served by ComfyUI behind the comfyui-qwen MCP bridge.
+    # ``default_model`` is the bridge's profile: turbo (8 steps) or base (25).
+    "comfyui_qwen": GenerationProviderSpec(
+        label="Qwen-Image (Local ComfyUI MCP)",
+        default_api_base="http://localhost:8189/mcp",
+        adapter="comfyui_qwen",
+        default_model="turbo",
+        is_local=True,
+    ),
     "openai": GenerationProviderSpec(
         label="OpenAI",
         default_api_base="https://api.openai.com/v1",
@@ -647,6 +656,8 @@ GENERATION_PROVIDER_ALIASES = {
     "openai_compatible": "custom",
     "x_ai": "xai",
     "grok": "xai",
+    "comfyui": "comfyui_qwen",
+    "qwen_image": "comfyui_qwen",
 }
 
 

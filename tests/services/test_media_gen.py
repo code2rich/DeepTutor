@@ -27,6 +27,7 @@ from deeptutor.services.generation_http import (
 )
 from deeptutor.services.imagegen import generate_image
 from deeptutor.services.imagegen.adapters.chat_completions import ChatCompletionsImagegenAdapter
+from deeptutor.services.imagegen.adapters.comfyui_qwen import ComfyUIQwenImagegenAdapter
 from deeptutor.services.imagegen.adapters.dashscope import DashScopeImagegenAdapter
 from deeptutor.services.imagegen.adapters.openai_compat import OpenAICompatImagegenAdapter
 from deeptutor.services.imagegen.config import ImagegenConfig
@@ -192,6 +193,90 @@ async def test_imagegen_adapter_raises_on_http_error(monkeypatch: pytest.MonkeyP
     config = ImagegenConfig(model="m", base_url="https://x/v1", api_key="k")
     with pytest.raises(GenerationProviderError, match="404"):
         await OpenAICompatImagegenAdapter().generate("x", config)
+
+
+def _mcp_result(*blocks: Any, is_error: bool = False) -> Any:
+    from mcp import types
+
+    return types.CallToolResult(content=list(blocks), isError=is_error)
+
+
+@pytest.mark.asyncio
+async def test_comfyui_qwen_adapter_maps_args_and_decodes_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import types
+
+    png = b"\x89PNG-qwen"
+    captured: dict[str, Any] = {}
+
+    async def fake_call_tool(config: ImagegenConfig, arguments: dict[str, Any], *, timeout: int):
+        captured.update(arguments=arguments, timeout=timeout, url=config.base_url)
+        return _mcp_result(
+            types.TextContent(type="text", text="saved: /out/qwen_img_00001_.png"),
+            types.ImageContent(
+                type="image", data=base64.b64encode(png).decode(), mimeType="image/png"
+            ),
+        )
+
+    monkeypatch.setattr(ComfyUIQwenImagegenAdapter, "_call_tool", staticmethod(fake_call_tool))
+    config = ImagegenConfig(
+        model="base",
+        adapter="comfyui_qwen",
+        base_url="http://host.docker.internal:8189/mcp",
+        size="1280x720",
+    )
+    images = await ComfyUIQwenImagegenAdapter().generate("一只猫", config, n=9)
+
+    assert images == [(png, "image/png")]
+    assert captured["url"] == "http://host.docker.internal:8189/mcp"
+    assert captured["arguments"] == {
+        "prompt": "一只猫",
+        "batch_size": 4,
+        "return_image": "full",
+        "model": "base",
+        "width": 1280,
+        "height": 720,
+    }
+    # Local diffusion needs far more than the hosted-API default.
+    assert captured["timeout"] >= 900
+
+
+@pytest.mark.asyncio
+async def test_comfyui_qwen_adapter_surfaces_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp import types
+
+    async def fake_call_tool(config: ImagegenConfig, arguments: dict[str, Any], *, timeout: int):
+        return _mcp_result(
+            types.TextContent(type="text", text="error: ComfyUI 不可达"), is_error=True
+        )
+
+    monkeypatch.setattr(ComfyUIQwenImagegenAdapter, "_call_tool", staticmethod(fake_call_tool))
+    config = ImagegenConfig(model="turbo", base_url="http://localhost:8189/mcp")
+    with pytest.raises(GenerationProviderError, match="ComfyUI 不可达"):
+        await ComfyUIQwenImagegenAdapter().generate("x", config)
+
+
+@pytest.mark.asyncio
+async def test_comfyui_qwen_adapter_rejects_text_only_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import types
+
+    async def fake_call_tool(config: ImagegenConfig, arguments: dict[str, Any], *, timeout: int):
+        return _mcp_result(types.TextContent(type="text", text="saved: /out/a.png"))
+
+    monkeypatch.setattr(ComfyUIQwenImagegenAdapter, "_call_tool", staticmethod(fake_call_tool))
+    config = ImagegenConfig(model="turbo", base_url="http://localhost:8189/mcp")
+    with pytest.raises(GenerationProviderError, match="returned no image"):
+        await ComfyUIQwenImagegenAdapter().generate("x", config)
+
+
+@pytest.mark.asyncio
+async def test_comfyui_qwen_adapter_unreachable_bridge_is_actionable() -> None:
+    config = ImagegenConfig(model="turbo", base_url="http://127.0.0.1:9/mcp")
+    with pytest.raises(GenerationProviderError, match="host.docker.internal"):
+        await ComfyUIQwenImagegenAdapter().generate("x", config)
 
 
 @pytest.mark.asyncio
@@ -787,6 +872,32 @@ def test_resolve_imagegen_openrouter_uses_chat_adapter() -> None:
     assert cfg.provider_name == "openrouter"
     assert cfg.adapter == "chat_completions"
     assert cfg.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_resolve_imagegen_comfyui_qwen_is_local_mcp() -> None:
+    catalog = {
+        "version": 1,
+        "services": {
+            "imagegen": {
+                "active_profile_id": "p",
+                "active_model_id": "m",
+                "profiles": [
+                    {
+                        "id": "p",
+                        "binding": "comfyui_qwen",
+                        "base_url": "",
+                        "api_key": "",
+                        "models": [{"id": "m", "model": "turbo"}],
+                    }
+                ],
+            }
+        },
+    }
+    cfg = resolve_imagegen_runtime_config(catalog=catalog)
+    assert cfg.provider_name == "comfyui_qwen"
+    assert cfg.adapter == "comfyui_qwen"
+    assert cfg.base_url == "http://localhost:8189/mcp"
+    assert cfg.model == "turbo"
 
 
 def test_resolve_videogen_config_uses_async_task_adapter() -> None:
